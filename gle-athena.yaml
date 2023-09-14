@@ -1,0 +1,117 @@
+---
+Parameters:
+#define strings that name is "S3BucketARN"
+  S3BucketARN: 
+    Type: String
+  S3BucketPath: 
+    Type: String
+#define resources 
+Resources:
+  #define an iam role 
+  #first line is the object name, "Type" is the aws service type/name
+  #Properties is the properties of the object 
+  AWSRecordingSearchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - glue.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: AthenaAccess
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action: athena:*
+              Resource: '*'
+      - PolicyName: GlueS3Access
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action:
+                - glue:*
+                - iam:ListRolePolicies
+                - iam:GetRole
+                - iam:GetRolePolicy
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - s3:GetBucketLocation
+                - s3:ListBucket
+                - s3:ListAllMyBuckets
+                - s3:GetBucketAcl
+                - s3:GetObject
+              Resource: !Sub
+                - ${s3bucketARN}*
+                - { s3bucketARN: !Ref S3BucketARN }
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - 'arn:aws:s3:::crawler-public*'
+                - 'arn:aws:s3:::aws-glue-*'
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: 'arn:aws:logs:*:*:/aws-glue/*'
+  QueryDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      DatabaseInput:
+        Description: 'recordingSearchDatabase'
+        Name: 'recordingsearch'
+      CatalogId: !Ref AWS::AccountId
+
+  MetadataCrawler:
+    DependsOn:
+      - QueryDatabase
+      - AWSRecordingSearchRole
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role:
+        Fn::GetAtt: [ AWSRecordingSearchRole, Arn ]
+      Description: 'RecordingSearchCrawler'
+      Schedule:
+        # Run crawler every day every 6 hours Monday to Friday
+        ScheduleExpression: 'cron(0 0/6 ? * MON-FRI *)'
+      DatabaseName: { Ref: QueryDatabase }
+      Targets:
+        S3Targets:
+          - Path: { Ref: S3BucketPath }
+            Exclusions:
+              - "**.wav"
+              - "**.webm"
+              - "**.zip"
+              - "**.opus"
+              - "**.txt"
+      TablePrefix: 'recordingSearch'
+      Name: 'recordingsearchcrawler'
+
+  # SampleQueryByRecordingStartTime:
+  #   DependsOn: MetadataCrawler
+  #   Type: AWS::Athena::NamedQuery
+  #   Properties:
+  #     Description: 'Query that lists recording file paths, starting from the most recent recording.'
+  #     QueryString:
+  #                   SELECT filepath from recordingsearch<replace_with_path>
+  #                   ORDER BY startTime desc;
+  #     Database: { Ref: QueryDatabase }
+  #     Name: 'Sample Query By Recording Start Time'
+
+  # SampleQueryByDnis:
+  #   DependsOn: MetadataCrawler
+  #   Type: AWS::Athena::NamedQuery
+  #   Properties:
+  #     Description: 'Query that lists recording file paths using dnis to filter.'
+  #     QueryString:
+  #                   SELECT filepath from recordingsearch<replace_with_path>
+  #                   WHERE dnisNormalized='<replace_with_dnis>';
+  #     Database: { Ref: QueryDatabase }
+  #     Name: 'Sample Query By dnis'
