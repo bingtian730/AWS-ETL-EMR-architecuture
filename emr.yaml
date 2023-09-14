@@ -1,0 +1,364 @@
+AWSTemplateFormatVersion: 2010-09-09
+Conditions:
+  Hbase: !Equals 
+    - !Ref Applications
+    - Hbase
+  Spark: !Equals 
+    - !Ref Applications
+    - Spark
+Description: ABProjectCluster
+Mappings:
+  SubnetConfig:
+    VPC:
+      CIDR: 10.0.0.0/16
+    Public1:
+      CIDR: 10.0.10.0/24
+    Public2:
+      CIDR: 10.0.11.0/24
+    Private1:
+      CIDR: 10.0.20.0/24
+    Private2:
+      CIDR: 10.0.21.0/24
+
+Parameters:
+  S3BucketARN:
+    Type: String
+    Default: arn:aws:s3:::abstwestwo
+  S3BucketPath: 
+    Type: String
+    Default: s3://abstwestwo
+  Applications:
+    Default: Spark
+    Description: 'Cluster setup:'
+    Type: String
+  CoreInstanceType:
+    Default: m5.xlarge
+    Description: Instance type to be used for core instances.
+    Type: String
+  EMRClusterName:
+    Default: myNEWProdCluster
+    Description: Name of the cluster
+    Type: String
+  KeyName:
+    Default: abprojectkeypair
+    Description: Must be an existing Keyname
+    Type: String
+  LogUri:
+    Default: 's3://ab-data-st-west2/logs/'
+    Description: Must be a valid S3 URL
+    Type: String
+  MasterInstacneType:
+    Default: m5.xlarge
+    Description: Instance type to be used for the master instance.
+    Type: String
+  NumberOfCoreInstances:
+    Default: 2
+    Description: Must be a valid number
+    Type: Number
+  ReleaseLabel:
+    Default: emr-5.35.0
+    Description: Must be a valid EMR release version
+    Type: String
+  SubnetID:
+    Default: subnet-00044f08388fabf88
+    Description: Must be Valid a private subnet 
+    Type: String
+
+Resources:
+  EMRDevExpVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: !FindInMap 
+        - SubnetConfig
+        - VPC
+        - CIDR
+      InstanceTenancy: default
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      Tags:
+        - Key: Name
+          Value: EMR-Dev-Exp-VPC
+        - Key: for-use-with-amazon-emr-managed-policies
+          Value: 'true'
+
+  # VPCENDPOINT:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     VpcId: !Ref EMRDevExpVPC
+  #     ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+
+##########################
+######## EMR CLUSTER PART #############
+  EMRCluster:
+    DependsOn:
+      - EMRClusterServiceRole
+      - EMRClusterinstanceProfileRole
+      - EMRClusterinstanceProfile
+    Properties:
+      Applications:
+        - Name: Spark
+        - Name: Hive
+        - Name: Hadoop
+        - Name: Pig
+        - Name: HBase
+        - Name: Hue
+      
+
+      AutoScalingRole: EMR_AutoScaling_DefaultRole
+      Configurations:
+        - Classification: hive-site
+          ConfigurationProperties:
+            hive.metastore.client.factory.class: >-
+              com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory
+        - Classification: spark
+          ConfigurationProperties:
+            # maximizeResourceAllocation: 'true'
+            spark.driver.memory: "21000M"
+            spark.executor.memory: "21000M"
+            spark.yarn.executor.memoryOverhead: "21000M"
+            spark.yarn.driver.memoryOverhead: "21000M"
+        - Classification: presto-connector-hive
+          ConfigurationProperties:
+            hive.metastore.glue.datacatalog.enabled: 'true'
+        - Classification: spark-hive-site
+          ConfigurationProperties:
+            hive.metastore.client.factory.class: >-
+              com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory
+        - Classification: yarn-site
+          ConfigurationProperties:
+            yarn.acl.enable: true
+            yarn.resourcemanager.scheduler.class: org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairScheduler
+            yarn.nodemanager.vmem-check-enabled: false
+            yarn.timeline-service.enabled: true
+        # - Classification: emrfs-site
+        #   ConfigurationProperties:
+        #     "fs.s3.consistent.retryPeriodSeconds": "1"
+        #     "fs.s3.consistent": "true"
+        #     "fs.s3.consistent.retryCount": "10"
+        #     "fs.s3.consistent.metadata.read.capacity": "500"
+        #     "fs.s3.consistent.metadata.write.capacity": "100"
+        #     "fs.s3.consistent.metadata.tableName": "EmrFSMetadata"
+###### ADD enbale emrfs here ########
+      
+      EbsRootVolumeSize: 100
+      Instances:
+        CoreInstanceGroup:
+          EbsConfiguration:
+            EbsBlockDeviceConfigs:
+              - VolumeSpecification:
+                  SizeInGB: '64'
+                  VolumeType: gp2
+                VolumesPerInstance: '1'
+            EbsOptimized: 'true'
+          InstanceCount: 2
+          InstanceType: m5.xlarge
+          Market: ON_DEMAND
+          Name: coreNinja
+          AutoScalingPolicy:
+            Constraints:
+              MinCapacity: 2
+              MaxCapacity: 10
+            Rules:
+              - Name: Scale-out
+                Description: Scale-out policy
+                Action:
+                  SimpleScalingPolicyConfiguration:
+                    AdjustmentType: CHANGE_IN_CAPACITY
+                    ScalingAdjustment: 1
+                    CoolDown: 300
+                Trigger:
+                  CloudWatchAlarmDefinition:
+                    Dimensions:
+                      - Key: JobFlowId
+                        Value: '${emr.clusterId}'
+                    EvaluationPeriods: 1
+                    Namespace: AWS/ElasticMapReduce
+                    Period: 300
+                    ComparisonOperator: LESS_THAN
+                    Statistic: AVERAGE
+                    Threshold: 15
+                    Unit: PERCENT
+                    MetricName: YARNMemoryAvailablePercentage
+              - Name: Scale-in
+                Description: Scale-in policy
+                Action:
+                  SimpleScalingPolicyConfiguration:
+                    AdjustmentType: CHANGE_IN_CAPACITY
+                    ScalingAdjustment: -1
+                    CoolDown: 300
+                Trigger:
+                  CloudWatchAlarmDefinition:
+                    Dimensions:
+                      - Key: JobFlowId
+                        Value: '${emr.clusterId}'
+                    EvaluationPeriods: 1
+                    Namespace: AWS/ElasticMapReduce
+                    Period: 300
+                    ComparisonOperator: GREATER_THAN
+                    Statistic: AVERAGE
+                    Threshold: 75
+                    Unit: PERCENT
+                    MetricName: YARNMemoryAvailablePercentage
+
+        MasterInstanceGroup:
+          EbsConfiguration:
+            EbsBlockDeviceConfigs:
+              - VolumeSpecification:
+                  SizeInGB: '64'
+                  VolumeType: gp2
+                VolumesPerInstance: '1'
+            EbsOptimized: 'true'
+          InstanceCount: 1
+          InstanceType: m5.xlarge
+          Market: ON_DEMAND
+          Name: masterNinja
+          
+        Ec2KeyName: !Ref KeyName
+        Ec2SubnetId: !Ref SubnetID
+        TerminationProtected: false
+      JobFlowRole: !Ref EMRClusterinstanceProfile
+      LogUri: !Ref LogUri
+      Name: !Ref EMRClusterName
+      ReleaseLabel: !Ref ReleaseLabel
+      ServiceRole: !Ref EMRClusterServiceRole
+      VisibleToAllUsers: true
+    Type: 'AWS::EMR::Cluster'
+  EMRClusterServiceRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - elasticmapreduce.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole'
+      Path: /
+      Policies:
+        - PolicyName: s3fullaccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 's3:*'
+                Resource: '*'
+    Type: 'AWS::IAM::Role'
+  EMRClusterinstanceProfile:
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EMRClusterinstanceProfileRole
+    Type: 'AWS::IAM::InstanceProfile'
+  EMRClusterinstanceProfileRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceforEC2Role'
+      Path: /
+    Type: 'AWS::IAM::Role'
+  EMRStep:
+    Type: 'AWS::EMR::Step'
+    Properties:
+      ActionOnFailure: CONTINUE
+      HadoopJarStep:
+        Args:
+          - state-pusher-script
+        Jar: 'command-runner.jar'
+      Name: 'setup-hadoop-debugging'
+      JobFlowId: !Ref EMRCluster
+
+
+  EMRDevExpSecGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: EMRDevExp-Default-SG
+      GroupDescription: Security Group for EMRDevExp-Default-SG
+      VpcId: !Ref EMRDevExpVPC
+      SecurityGroupIngress:
+        - IpProtocol: '-1'
+          CidrIp: !FindInMap 
+            - SubnetConfig
+            - VPC
+            - CIDR
+      Tags:
+        - Key: Name
+          Value: EMRDevExp-Default-SG
+        
+# ########### EMR CLUSTER PART ##########
+
+
+ ############
+  # VPCDefaultSecurityGroupIngress:
+  #   Type: 'AWS::EC2::SecurityGroupIngress'
+  #   Properties:
+  #     GroupId: !GetAtt 
+  #       - EMRDevExpVPC
+  #       - DefaultSecurityGroup
+  #     IpProtocol: '-1'
+  #     CidrIp: !FindInMap 
+  #       - SubnetConfig
+  #       - VPC
+  #       - CIDR
+
+
+  AWSglueathenacf7Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - glue.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: AWSGlueServiceRole-ab-developer
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action: '*'
+              Resource: '*'
+
+  QueryDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      DatabaseInput:
+        Name: 'abstdatabase'
+      CatalogId: !Ref AWS::AccountId
+
+
+  MetadataCrawler:
+    DependsOn:
+      - QueryDatabase
+      - AWSglueathenacf7Role
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role:
+        Fn::GetAtt: [ AWSglueathenacf7Role, Arn ]
+      Description: 'AWSglueathenacfCrawler'
+      Schedule:
+        # Run crawler every day every 6 hours Monday to Friday
+        ScheduleExpression: 'cron(0 0/6 ? * MON-FRI *)'
+      DatabaseName: { Ref: QueryDatabase }
+      Targets:
+        S3Targets:
+          - Path: { Ref: S3BucketPath }
+            Exclusions:
+              - "**.zip"
+              - "**.opus"
+              - "**.txt"
+      TablePrefix: ''
+      Name: 'gluecrawler'
